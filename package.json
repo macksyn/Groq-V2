@@ -11,7 +11,7 @@
     "pm2:logs": "pm2 logs groq-ai"
   },
   "keywords": ["whatsapp", "bot", "baileys", "md"],
-  "author": "Your Name",
+  "author": "Alex Macksyn",
   "license": "MIT",
   "dependencies": {
     "@whiskeysockets/baileys": "github:macksyn/Malvin-Baileys",
