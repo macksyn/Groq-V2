@@ -68,9 +68,9 @@ async function initializeBot() {
     await state.mongoManager.connect();
     console.log(chalk.green('✅ MongoDB connected\n'));
 
-    // Initialize Session Manager
+    // Initialize Session Manager - PASS PROCESS.ENV HERE
     console.log(chalk.blue('🔐 Initializing Session Manager...'));
-    state.sessionManager = new SessionManager();
+    state.sessionManager = new SessionManager(process.env);
     await state.sessionManager.initialize();
     console.log(chalk.green('✅ Session initialized\n'));
 

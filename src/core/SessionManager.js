@@ -20,9 +20,20 @@ export class SessionManager {
       await fs.mkdir(this.sessionDir, { recursive: true });
       console.log(chalk.blue('📁 Session directory ready'));
       
-      // Download session if needed
-      if (!await this.sessionExists() && this.config.SESSION_ID) {
-        await this.downloadSession();
+      // Check if session already exists
+      const sessionExists = await this.sessionExists();
+      
+      if (sessionExists) {
+        console.log(chalk.green('✅ Existing session found, will use it'));
+      } else if (this.config?.SESSION_ID) {
+        console.log(chalk.yellow('📥 No existing session, attempting Mega download...'));
+        const downloaded = await this.downloadSession();
+        
+        if (!downloaded) {
+          console.log(chalk.yellow('💡 Will use QR code authentication on first connection'));
+        }
+      } else {
+        console.log(chalk.yellow('⚠️ No SESSION_ID provided, will use QR code authentication'));
       }
       
     } catch (error) {
@@ -40,38 +51,75 @@ export class SessionManager {
   }
 
   async downloadSession() {
-    if (!this.config.SESSION_ID?.includes('~')) {
-      console.log(chalk.yellow('📱 No valid SESSION_ID, will use QR code authentication.'));
+    const sessionId = this.config?.SESSION_ID;
+    
+    if (!sessionId) {
+      console.log(chalk.yellow('📝 No SESSION_ID in config'));
+      return false;
+    }
+
+    // Parse SESSION_ID format: BotName~fileId#key
+    if (!sessionId.includes('~')) {
+      console.log(chalk.red('❌ SESSION_ID missing ~ separator'));
+      console.log(chalk.yellow(`📝 Format should be: BotName~fileId#key`));
+      console.log(chalk.yellow(`📝 Got: ${sessionId}`));
       return false;
     }
 
     try {
-      console.log(chalk.yellow('📥 Downloading session from Mega...'));
+      console.log(chalk.blue(`🔍 Parsing SESSION_ID...`));
       
-      const [botName, fileData] = this.config.SESSION_ID.split('~');
+      const parts = sessionId.split('~');
+      if (parts.length !== 2) {
+        throw new Error(`SESSION_ID should have exactly one ~ separator, got ${parts.length - 1}`);
+      }
+
+      const [botName, fileData] = parts;
+      console.log(chalk.cyan(`  Bot Name: ${botName}`));
+      console.log(chalk.cyan(`  File Data: ${fileData}`));
+
       if (!fileData || !fileData.includes('#')) {
-        throw new Error('Invalid SESSION_ID format. Expected: BotName~fileId#key');
+        throw new Error(`File data missing # separator. Got: ${fileData}`);
       }
 
-      const [fileId, key] = fileData.split('#');
+      const fileParts = fileData.split('#');
+      if (fileParts.length !== 2) {
+        throw new Error(`File data should have exactly one # separator, got ${fileParts.length - 1}`);
+      }
+
+      const [fileId, key] = fileParts;
       
-      if (!fileId || !key || fileId.length < 8 || key.length < 16) {
-        throw new Error('Invalid file ID or key format');
+      console.log(chalk.cyan(`  File ID: ${fileId} (${fileId.length} chars)`));
+      console.log(chalk.cyan(`  Key: ${key.substring(0, 20)}... (${key.length} chars)`));
+
+      // Validate lengths (be more lenient)
+      if (!fileId || fileId.length < 6) {
+        throw new Error(`File ID too short: "${fileId}" (${fileId.length} chars, need at least 6)`);
       }
 
-      const file = File.fromURL(`https://mega.nz/file/${fileId}#${key}`);
+      if (!key || key.length < 12) {
+        throw new Error(`Key too short: "${key}" (${key.length} chars, need at least 12)`);
+      }
+
+      console.log(chalk.green('✅ SESSION_ID format valid'));
+      console.log(chalk.yellow('📥 Downloading from Mega.nz...'));
+      
+      const megaUrl = `https://mega.nz/file/${fileId}#${key}`;
+      console.log(chalk.cyan(`🔗 URL: ${megaUrl}`));
+      
+      const file = File.fromURL(megaUrl);
 
       const data = await new Promise((resolve, reject) => {
         const timeout = setTimeout(() => {
           reject(new Error('Download timeout after 60 seconds'));
         }, 60000);
 
-        file.download((error, data) => {
+        file.download((error, downloadedData) => {
           clearTimeout(timeout);
           if (error) {
-            reject(error);
+            reject(new Error(`Mega download failed: ${error.message}`));
           } else {
-            resolve(data);
+            resolve(downloadedData);
           }
         });
       });
@@ -80,20 +128,29 @@ export class SessionManager {
         throw new Error('Downloaded session data is empty');
       }
 
+      console.log(chalk.cyan(`📦 Downloaded ${(data.length / 1024).toFixed(2)}KB`));
+
       // Validate JSON
+      let parsedData;
       try {
-        JSON.parse(data);
+        parsedData = JSON.parse(data);
+        console.log(chalk.cyan(`✅ Valid JSON format`));
       } catch (parseError) {
-        throw new Error('Downloaded session data is not valid JSON');
+        throw new Error(`Downloaded data is not valid JSON: ${parseError.message}`);
       }
 
       await fs.writeFile(this.credsPath, data);
-      console.log(chalk.green('✅ Session downloaded successfully from Mega!'));
+      console.log(chalk.green('✅ Session file saved successfully'));
       return true;
 
     } catch (error) {
-      console.log(chalk.red('❌ Failed to download session from Mega:'), error.message);
-      console.log(chalk.yellow('💡 Will proceed with QR code authentication...'));
+      console.log(chalk.red('❌ Session download failed:'));
+      console.log(chalk.red(`   ${error.message}`));
+      console.log(chalk.yellow('💡 Troubleshooting tips:'));
+      console.log(chalk.yellow('   1. Verify SESSION_ID is correct: BotName~fileId#key'));
+      console.log(chalk.yellow('   2. Check if Mega link still works: https://mega.nz/file/fileId#key'));
+      console.log(chalk.yellow('   3. Ensure creds.json was properly uploaded to Mega'));
+      console.log(chalk.yellow('   4. Will proceed with QR code authentication'));
       return false;
     }
   }
