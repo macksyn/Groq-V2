@@ -1,120 +1,124 @@
-import { useMultiFileAuthState } from '@whiskeysockets/baileys';
-import { File as MegaFile } from 'megajs';
-import { promises as fs } from 'fs';
+import fs from 'fs/promises';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { useMultiFileAuthState } from '@whiskeysockets/baileys';
+import { File } from 'megajs';
 import chalk from 'chalk';
 
-const SESSION_DIR = './sessions';
-const SESSION_FILE = 'creds.json';
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export class SessionManager {
-  constructor() {
-    this.sessionId = process.env.SESSION_ID;
-    this.sessionPath = SESSION_DIR;
+  constructor(config) {
+    this.config = config;
+    this.sessionDir = path.join(__dirname, '../../sessions');
+    this.credsPath = path.join(this.sessionDir, 'creds.json');
   }
 
-  /**
-   * Initialize session
-   */
   async initialize() {
-    await this.ensureSessionDir();
-
-    if (this.sessionId && !await this.sessionExists()) {
-      console.log(chalk.yellow('📥 Downloading session from Mega.nz...'));
-      await this.downloadSession();
-    }
-
-    if (!await this.sessionExists()) {
-      console.log(chalk.yellow('⚠️  No existing session found. QR code will be displayed.'));
-    }
-  }
-
-  /**
-   * Ensure session directory exists
-   */
-  async ensureSessionDir() {
     try {
-      await fs.access(this.sessionPath);
-    } catch {
-      await fs.mkdir(this.sessionPath, { recursive: true });
+      // Create session directory
+      await fs.mkdir(this.sessionDir, { recursive: true });
+      console.log(chalk.blue('📁 Session directory ready'));
+      
+      // Download session if needed
+      if (!await this.sessionExists() && this.config.SESSION_ID) {
+        await this.downloadSession();
+      }
+      
+    } catch (error) {
+      console.log(chalk.yellow('⚠️ Session initialization warning:'), error.message);
     }
   }
 
-  /**
-   * Check if session exists
-   */
   async sessionExists() {
     try {
-      await fs.access(path.join(this.sessionPath, SESSION_FILE));
+      await fs.access(this.credsPath);
       return true;
     } catch {
       return false;
     }
   }
 
-  /**
-   * Download session from Mega.nz
-   * Expected format: botName~fileId#decryptionKey
-   */
   async downloadSession() {
-    if (!this.sessionId) {
-      throw new Error('SESSION_ID not provided');
+    if (!this.config.SESSION_ID?.includes('~')) {
+      console.log(chalk.yellow('📱 No valid SESSION_ID, will use QR code authentication.'));
+      return false;
     }
 
     try {
-      // Parse SESSION_ID format
-      const match = this.sessionId.match(/~(.+)#(.+)/);
-      if (!match) {
-        throw new Error('Invalid SESSION_ID format. Expected: botName~fileId#key');
+      console.log(chalk.yellow('📥 Downloading session from Mega...'));
+      
+      const [botName, fileData] = this.config.SESSION_ID.split('~');
+      if (!fileData || !fileData.includes('#')) {
+        throw new Error('Invalid SESSION_ID format. Expected: BotName~fileId#key');
       }
 
-      const [, fileId, key] = match;
-      const megaUrl = `https://mega.nz/file/${fileId}#${key}`;
+      const [fileId, key] = fileData.split('#');
+      
+      if (!fileId || !key || fileId.length < 8 || key.length < 16) {
+        throw new Error('Invalid file ID or key format');
+      }
 
-      console.log(chalk.blue(`📥 Downloading from: ${megaUrl}`));
+      const file = File.fromURL(`https://mega.nz/file/${fileId}#${key}`);
 
-      const file = MegaFile.fromURL(megaUrl);
-      await new Promise((resolve, reject) => {
-        file.loadAttributes((err) => {
-          if (err) reject(err);
-          else resolve();
+      const data = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Download timeout after 60 seconds'));
+        }, 60000);
+
+        file.download((error, data) => {
+          clearTimeout(timeout);
+          if (error) {
+            reject(error);
+          } else {
+            resolve(data);
+          }
         });
       });
-
-      const buffer = await file.downloadBuffer();
       
-      // Save session file
-      await fs.writeFile(
-        path.join(this.sessionPath, SESSION_FILE),
-        buffer
-      );
+      if (!data || data.length === 0) {
+        throw new Error('Downloaded session data is empty');
+      }
 
-      console.log(chalk.green('✅ Session downloaded successfully'));
+      // Validate JSON
+      try {
+        JSON.parse(data);
+      } catch (parseError) {
+        throw new Error('Downloaded session data is not valid JSON');
+      }
+
+      await fs.writeFile(this.credsPath, data);
+      console.log(chalk.green('✅ Session downloaded successfully from Mega!'));
+      return true;
+
     } catch (error) {
-      console.error(chalk.red('❌ Failed to download session:'), error.message);
-      throw error;
+      console.log(chalk.red('❌ Failed to download session from Mega:'), error.message);
+      console.log(chalk.yellow('💡 Will proceed with QR code authentication...'));
+      return false;
     }
   }
 
-  /**
-   * Get authentication state
-   */
   async getAuthState() {
-    return await useMultiFileAuthState(this.sessionPath);
+    return await useMultiFileAuthState(this.sessionDir);
   }
 
-  /**
-   * Clean session directory
-   */
   async cleanSession() {
     try {
-      const files = await fs.readdir(this.sessionPath);
+      const files = await fs.readdir(this.sessionDir);
       for (const file of files) {
-        await fs.unlink(path.join(this.sessionPath, file));
+        const filePath = path.join(this.sessionDir, file);
+        try {
+          const stats = await fs.lstat(filePath);
+          if (stats.isFile()) {
+            await fs.unlink(filePath);
+          }
+        } catch (fileError) {
+          console.warn(chalk.yellow(`⚠️ Could not delete ${file}:`, fileError.message));
+        }
       }
-      console.log(chalk.green('✅ Session cleaned'));
+      console.log(chalk.yellow('🗑️ Session files cleaned'));
     } catch (error) {
-      console.error(chalk.red('❌ Failed to clean session:'), error);
+      console.log(chalk.yellow('⚠️ Could not clean session:'), error.message);
     }
   }
 }

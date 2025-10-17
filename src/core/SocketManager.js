@@ -1,4 +1,5 @@
-import makeWASocket, {
+import {
+  makeWASocket,
   DisconnectReason,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
@@ -7,6 +8,7 @@ import makeWASocket, {
 import qrcode from 'qrcode-terminal';
 import chalk from 'chalk';
 import { Boom } from '@hapi/boom';
+import logger from '../utils/logger.js';
 
 const MAX_RETRIES = 8;
 const BASE_DELAY = 1000;
