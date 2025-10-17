@@ -1,0 +1,30 @@
+{
+  "name": "Groq AI",
+  "version": "2.0.0",
+  "description": "High-performance modular WhatsApp MD bot framework",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "pm2": "pm2 start ecosystem.config.js",
+    "pm2:stop": "pm2 stop groq-ai",
+    "pm2:logs": "pm2 logs groq-ai"
+  },
+  "keywords": ["whatsapp", "bot", "baileys", "md"],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@whiskeysockets/baileys": "github:macksyn/Malvin-Baileys",
+    "express": "^4.18.2",
+    "mongodb": "^6.3.0",
+    "pino": "^8.17.2",
+    "chalk": "^5.3.0",
+    "qrcode-terminal": "^0.12.0",
+    "dotenv": "^16.3.1",
+    "megajs": "^1.1.1",
+    "node-cache": "^5.1.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
