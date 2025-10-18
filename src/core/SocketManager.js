@@ -1,7 +1,6 @@
 import {
   makeWASocket,
   DisconnectReason,
-  useMultiFileAuthState,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore
 } from '@whiskeysockets/baileys';
@@ -39,17 +38,28 @@ export class SocketManager {
       const { state, saveCreds } = await this.sessionManager.getAuthState();
       const { version } = await fetchLatestBaileysVersion();
 
+      console.log(chalk.cyan(`📱 Using WhatsApp version: ${version.join('.')}`));
+
       this.sock = makeWASocket({
         version,
         auth: {
           creds: state.creds,
           keys: makeCacheableSignalKeyStore(state.keys, logger)
         },
-        printQRInTerminal: false,
+        printQRInTerminal: true,
         browser: ['Groq Bot', 'Chrome', '1.0.0'],
+        logger: logger,
         getMessage: async (key) => {
           return { conversation: '' };
-        }
+        },
+        syncFullHistory: false,
+        markOnlineOnConnect: true,
+        maxMsgRetryCount: 3,
+        retryRequestDelayMs: 500,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
+        emitOwnEvents: false,
+        shouldIgnoreJid: jid => jid === 'status@broadcast',
       });
 
       // Remove old listeners
@@ -80,6 +90,21 @@ export class SocketManager {
         qrcode.generate(qr, { small: true });
       }
 
+      if (connection === 'connecting') {
+        console.log(chalk.blue('🔄 Connecting to WhatsApp...'));
+      }
+
+      if (connection === 'open') {
+        console.log(chalk.green('✅ WhatsApp connection established'));
+        console.log(chalk.cyan(`📱 Connected as: ${this.sock.user?.name || 'Unknown'}`));
+        this.retryCount = 0;
+        
+        // Send startup notification to owner after a delay
+        setTimeout(() => {
+          this.sendStartupNotification();
+        }, 3000);
+      }
+
       if (connection === 'close') {
         const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
         const shouldReconnect = reason !== DisconnectReason.loggedOut;
@@ -93,9 +118,6 @@ export class SocketManager {
           await this.sessionManager.cleanSession();
           process.exit(0);
         }
-      } else if (connection === 'open') {
-        console.log(chalk.green('✅ WhatsApp connection established'));
-        this.retryCount = 0;
       }
     };
 
@@ -113,23 +135,102 @@ export class SocketManager {
   }
 
   /**
-   * Setup message listener
+   * Setup message listener - CRITICAL FOR RECEIVING MESSAGES
    */
   setupMessageListener() {
-    const listener = async ({ messages, type }) => {
-      if (type !== 'notify') return;
+    const listener = async (update) => {
+      try {
+        const { messages, type } = update;
 
-      for (const msg of messages) {
-        try {
-          await this.pluginManager.handleMessage(msg, this.sock);
-        } catch (error) {
-          console.error(chalk.red('❌ Error handling message:'), error);
+        if (!messages || messages.length === 0) {
+          console.log(chalk.gray('ℹ️ Empty message update'));
+          return;
         }
+
+        console.log(chalk.yellow(`\n📨 Received ${messages.length} message(s) (type: ${type})`));
+
+        for (const msg of messages) {
+          try {
+            // Skip if from self (own messages)
+            if (msg.key?.fromMe) {
+              console.log(chalk.gray('ℹ️ Skipping own message'));
+              continue;
+            }
+
+            const sender = msg.key?.remoteJid;
+            if (!sender) {
+              console.log(chalk.gray('ℹ️ No sender info, skipping'));
+              continue;
+            }
+
+            // Extract message text
+            const text = this.extractMessageText(msg);
+
+            if (!text || text.trim().length === 0) {
+              console.log(chalk.gray(`ℹ️ Empty message from ${sender}`));
+              continue;
+            }
+
+            console.log(chalk.green(`✅ Message from ${sender}: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`));
+
+            // Pass to plugin manager for command handling
+            await this.pluginManager.handleMessage(msg, this.sock);
+
+          } catch (msgError) {
+            console.error(chalk.red('❌ Error processing individual message:'), msgError.message);
+          }
+        }
+
+      } catch (error) {
+        console.error(chalk.red('❌ Message listener error:'), error.message);
       }
     };
 
     this.sock.ev.on('messages.upsert', listener);
     this.listeners.set('messages.upsert', listener);
+  }
+
+  /**
+   * Extract message text from various message types
+   */
+  extractMessageText(msg) {
+    return (
+      msg.message?.conversation ||
+      msg.message?.extendedTextMessage?.text ||
+      msg.message?.imageMessage?.caption ||
+      msg.message?.videoMessage?.caption ||
+      ''
+    );
+  }
+
+  /**
+   * Send startup notification to owner
+   */
+  async sendStartupNotification() {
+    try {
+      const ownerNumber = process.env.OWNER_NUMBER;
+      if (!ownerNumber) {
+        console.log(chalk.yellow('⚠️ No OWNER_NUMBER set, skipping startup notification'));
+        return;
+      }
+
+      const jid = ownerNumber + '@s.whatsapp.net';
+      const botName = process.env.BOT_NAME || 'Groq Bot';
+
+      const message = `🤖 *${botName} is now online!*
+
+✅ Status: Running
+🔌 Connection: Established
+⏰ Time: ${new Date().toLocaleString()}
+
+Type *.help* for commands.`;
+
+      await this.sock.sendMessage(jid, { text: message });
+      console.log(chalk.green('📤 Startup notification sent to owner'));
+
+    } catch (error) {
+      console.warn(chalk.yellow('⚠️ Startup notification failed:'), error.message);
+    }
   }
 
   /**
@@ -139,7 +240,11 @@ export class SocketManager {
     if (!this.sock) return;
 
     for (const [event, listener] of this.listeners) {
-      this.sock.ev.off(event, listener);
+      try {
+        this.sock.ev.off(event, listener);
+      } catch (error) {
+        console.warn(chalk.yellow(`⚠️ Could not remove listener for ${event}:`), error.message);
+      }
     }
     this.listeners.clear();
   }

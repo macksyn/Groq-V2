@@ -1,3 +1,5 @@
+// src/core/PluginManager.js - Enhanced with automatic database sync
+
 import { promises as fs } from 'fs';
 import path from 'path';
 import chalk from 'chalk';
@@ -22,25 +24,33 @@ export class PluginManager {
   }
 
   /**
-   * Load all plugins from plugins directory
+   * Load all plugins from plugins directory and sync to database
    */
   async loadPlugins() {
     try {
+      console.log(chalk.blue('📦 Loading plugins...'));
+      
       const files = await fs.readdir(PLUGINS_DIR);
       const jsFiles = files.filter(f => f.endsWith('.js'));
 
+      console.log(chalk.cyan(`   Found ${jsFiles.length} plugin files`));
+
+      // Load each plugin file
       for (const file of jsFiles) {
         await this.loadPlugin(file);
       }
 
-      console.log(chalk.green(`✅ Loaded ${this.plugins.size} plugins`));
+      // Sync loaded plugins to database
+      await this.syncPluginsToDatabase();
+
+      console.log(chalk.green(`✅ Loaded ${this.plugins.size} plugins successfully`));
     } catch (error) {
       console.error(chalk.red('❌ Error loading plugins:'), error);
     }
   }
 
   /**
-   * Load individual plugin
+   * Load individual plugin from file
    */
   async loadPlugin(filename) {
     try {
@@ -48,7 +58,7 @@ export class PluginManager {
       const plugin = await import(`file://${pluginPath}?t=${Date.now()}`);
 
       if (!plugin.default || !plugin.default.name) {
-        console.warn(chalk.yellow(`⚠️  Invalid plugin: ${filename}`));
+        console.warn(chalk.yellow(`⚠️  Invalid plugin structure: ${filename}`));
         return;
       }
 
@@ -57,14 +67,149 @@ export class PluginManager {
         filename,
         enabled: true,
         crashes: 0,
-        lastCrash: null
+        lastCrash: null,
+        loadedAt: new Date()
       };
 
       this.plugins.set(plugin.default.name, pluginData);
-      console.log(chalk.blue(`  ✓ Loaded: ${plugin.default.name}`));
+      console.log(chalk.blue(`   ✓ ${plugin.default.name}`));
     } catch (error) {
-      console.error(chalk.red(`❌ Failed to load ${filename}:`), error.message);
+      console.error(chalk.red(`   ✗ Failed to load ${filename}:`), error.message);
     }
+  }
+
+  /**
+   * Sync all loaded plugins to MongoDB
+   */
+  async syncPluginsToDatabase() {
+    try {
+      const db = this.mongoManager.getDB();
+      const pluginsCol = db.collection('plugins');
+
+      console.log(chalk.blue('💾 Syncing plugins to database...'));
+
+      // Get existing plugins from database
+      const existingPlugins = await pluginsCol.find({}).toArray();
+      const existingMap = new Map(existingPlugins.map(p => [p.name, p]));
+
+      let added = 0;
+      let updated = 0;
+      let unchanged = 0;
+
+      // Sync each loaded plugin
+      for (const [name, plugin] of this.plugins) {
+        const existing = existingMap.get(name);
+
+        const pluginDoc = {
+          name: plugin.name,
+          description: plugin.description || 'No description',
+          category: plugin.category || 'general',
+          aliases: plugin.aliases || [],
+          usage: plugin.usage || '',
+          example: plugin.example || '',
+          filename: plugin.filename,
+          ownerOnly: plugin.ownerOnly || false,
+          enabled: existing ? existing.enabled : true, // Preserve enabled state
+          crashes: existing ? existing.crashes : 0,
+          lastCrash: existing ? existing.lastCrash : null,
+          updatedAt: new Date(),
+          version: plugin.version || '1.0.0'
+        };
+
+        if (!existing) {
+          // New plugin - insert
+          pluginDoc.createdAt = new Date();
+          await pluginsCol.insertOne(pluginDoc);
+          added++;
+        } else {
+          // Existing plugin - update only if changed
+          const hasChanges = 
+            existing.description !== pluginDoc.description ||
+            existing.category !== pluginDoc.category ||
+            JSON.stringify(existing.aliases) !== JSON.stringify(pluginDoc.aliases) ||
+            existing.usage !== pluginDoc.usage;
+
+          if (hasChanges) {
+            await pluginsCol.updateOne(
+              { name },
+              { $set: pluginDoc }
+            );
+            updated++;
+          } else {
+            unchanged++;
+          }
+
+          // Update in-memory enabled state from database
+          plugin.enabled = existing.enabled;
+        }
+      }
+
+      // Mark plugins in database that no longer exist in files
+      const loadedNames = Array.from(this.plugins.keys());
+      const orphanedPlugins = existingPlugins.filter(
+        p => !loadedNames.includes(p.name)
+      );
+
+      if (orphanedPlugins.length > 0) {
+        console.log(chalk.yellow(`   ⚠️  Found ${orphanedPlugins.length} orphaned plugins in database`));
+        for (const orphan of orphanedPlugins) {
+          await pluginsCol.updateOne(
+            { name: orphan.name },
+            { $set: { enabled: false, orphaned: true } }
+          );
+        }
+      }
+
+      console.log(chalk.green('   ✅ Database sync complete:'));
+      console.log(chalk.cyan(`      • Added: ${added}`));
+      console.log(chalk.cyan(`      • Updated: ${updated}`));
+      console.log(chalk.cyan(`      • Unchanged: ${unchanged}`));
+      if (orphanedPlugins.length > 0) {
+        console.log(chalk.yellow(`      • Orphaned: ${orphanedPlugins.length}`));
+      }
+
+    } catch (error) {
+      console.error(chalk.red('❌ Database sync failed:'), error);
+    }
+  }
+
+  /**
+   * Reload all plugins (useful for hot-reload)
+   */
+  async reloadPlugins() {
+    console.log(chalk.yellow('🔄 Reloading all plugins...'));
+    
+    // Clear current plugins
+    this.plugins.clear();
+    
+    // Reload from files
+    await this.loadPlugins();
+    
+    console.log(chalk.green('✅ Plugins reloaded'));
+  }
+
+  /**
+   * Reload a specific plugin
+   */
+  async reloadPlugin(pluginName) {
+    const plugin = this.plugins.get(pluginName);
+    
+    if (!plugin) {
+      throw new Error(`Plugin "${pluginName}" not found`);
+    }
+
+    console.log(chalk.blue(`🔄 Reloading plugin: ${pluginName}`));
+    
+    // Remove from memory
+    this.plugins.delete(pluginName);
+    
+    // Reload from file
+    await this.loadPlugin(plugin.filename);
+    
+    // Sync to database
+    await this.syncPluginsToDatabase();
+    
+    console.log(chalk.green(`✅ Plugin "${pluginName}" reloaded`));
   }
 
   /**
@@ -123,6 +268,14 @@ export class PluginManager {
       return;
     }
 
+    // Check owner-only commands
+    if (plugin.ownerOnly && !this.isOwner(sender)) {
+      await sock.sendMessage(sender, {
+        text: '❌ This command is only available to the bot owner.'
+      });
+      return;
+    }
+
     try {
       const db = this.mongoManager.getDB();
       const timeout = new Promise((_, reject) =>
@@ -134,6 +287,9 @@ export class PluginManager {
         timeout
       ]);
 
+      // Update usage stats
+      await this.updatePluginStats(plugin.name);
+
     } catch (error) {
       console.error(chalk.red(`❌ Plugin "${plugin.name}" error:`), error);
       
@@ -142,6 +298,27 @@ export class PluginManager {
       await sock.sendMessage(sender, {
         text: `❌ Error executing command: ${error.message}`
       });
+    }
+  }
+
+  /**
+   * Update plugin usage statistics
+   */
+  async updatePluginStats(pluginName) {
+    try {
+      const db = this.mongoManager.getDB();
+      const pluginsCol = db.collection('plugins');
+
+      await pluginsCol.updateOne(
+        { name: pluginName },
+        { 
+          $inc: { usageCount: 1 },
+          $set: { lastUsed: new Date() }
+        }
+      );
+    } catch (error) {
+      // Don't fail command execution if stats update fails
+      console.warn(chalk.yellow('⚠️ Failed to update plugin stats'), error.message);
     }
   }
 
@@ -162,8 +339,24 @@ export class PluginManager {
     plugin.crashes++;
     plugin.lastCrash = now;
 
+    // Update database
+    const db = this.mongoManager.getDB();
+    db.collection('plugins').updateOne(
+      { name: pluginName },
+      { 
+        $set: { crashes: plugin.crashes, lastCrash: new Date(now) }
+      }
+    ).catch(err => console.error('Failed to update crash count:', err));
+
     if (plugin.crashes >= MAX_CRASHES) {
       plugin.enabled = false;
+      
+      // Disable in database
+      db.collection('plugins').updateOne(
+        { name: pluginName },
+        { $set: { enabled: false } }
+      ).catch(err => console.error('Failed to disable plugin:', err));
+
       console.error(chalk.red(
         `🚫 Plugin "${pluginName}" auto-disabled after ${MAX_CRASHES} crashes`
       ));
@@ -196,13 +389,28 @@ export class PluginManager {
   }
 
   /**
+   * Check if user is owner
+   */
+  isOwner(jid) {
+    const ownerNumber = process.env.OWNER_NUMBER;
+    return jid.includes(ownerNumber);
+  }
+
+  /**
    * Enable plugin
    */
-  enablePlugin(name) {
+  async enablePlugin(name) {
     const plugin = this.plugins.get(name);
     if (plugin) {
       plugin.enabled = true;
       plugin.crashes = 0;
+      
+      // Update database
+      const db = this.mongoManager.getDB();
+      await db.collection('plugins').updateOne(
+        { name },
+        { $set: { enabled: true, crashes: 0 } }
+      );
       return true;
     }
     return false;
@@ -211,10 +419,17 @@ export class PluginManager {
   /**
    * Disable plugin
    */
-  disablePlugin(name) {
+  async disablePlugin(name) {
     const plugin = this.plugins.get(name);
     if (plugin) {
       plugin.enabled = false;
+      
+      // Update database
+      const db = this.mongoManager.getDB();
+      await db.collection('plugins').updateOne(
+        { name },
+        { $set: { enabled: false } }
+      );
       return true;
     }
     return false;
@@ -232,5 +447,12 @@ export class PluginManager {
    */
   getPluginCount() {
     return this.plugins.size;
+  }
+
+  /**
+   * Get plugin by name
+   */
+  getPlugin(name) {
+    return this.plugins.get(name);
   }
 }
